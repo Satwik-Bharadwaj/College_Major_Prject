@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trainos"
+version = "1.0.0"
+description = "Workload-Aware CPU Scheduling Layer for ML Training Jobs"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "psutil>=5.9",
+    "scikit-learn>=1.2",
+    "joblib>=1.2",
+    "numpy>=1.21",
+]
+
+[project.scripts]
+trainos = "trainos.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["trainos*"]
+
+[tool.setuptools.package-data]
+trainos = ["artifacts/*.joblib"]

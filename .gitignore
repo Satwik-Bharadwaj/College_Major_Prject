@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+wheels/
+trainos/artifacts/*.joblib
+trainos/artifacts/*.report.json
+*.csv
+!dataset.csv

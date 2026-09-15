@@ -1,0 +1,30 @@
+# systemd unit for running TrainOS as a background daemon on Ubuntu.
+#
+# Install:
+#   sudo cp deploy/trainos.service /etc/systemd/system/trainos.service
+#   # edit WorkingDirectory/ExecStart paths below to match where you copied the project
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now trainos
+#
+# Logs:
+#   journalctl -u trainos -f
+#
+# Stop:
+#   sudo systemctl stop trainos
+
+[Unit]
+Description=TrainOS Workload-Aware CPU Scheduling Layer
+After=multi-user.target
+
+[Service]
+Type=simple
+# Needs root to change other processes' nice/policy/affinity.
+User=root
+WorkingDirectory=/opt/trainos
+ExecStart=/opt/trainos/venv/bin/python -m trainos.cli run --interval 3
+Restart=on-failure
+RestartSec=5
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target
