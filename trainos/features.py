@@ -100,6 +100,35 @@ class ProcessTracker:
         return [f[name] for name in FEATURE_NAMES]
 
 
+def _safe_io_counters(proc):
+    """Return a process's io_counters, or None if unsupported/inaccessible.
+
+    macOS has no per-process I/O counters and some Linux setups restrict them;
+    in those cases io_wait/throughput features simply fall back to CPU-only
+    signals rather than crashing the collector.
+    """
+    fn = getattr(proc, "io_counters", None)
+    if fn is None:
+        return None
+    try:
+        return fn()
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess,
+            NotImplementedError, OSError):
+        return None
+
+
+def _safe_ctx_switches(proc):
+    """Return a process's num_ctx_switches, or None if unavailable."""
+    fn = getattr(proc, "num_ctx_switches", None)
+    if fn is None:
+        return None
+    try:
+        return fn()
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess,
+            NotImplementedError, OSError):
+        return None
+
+
 def _mean(vals: List[float]) -> float:
     return sum(vals) / len(vals) if vals else 0.0
 
@@ -140,16 +169,20 @@ class MetricCollector:
     def sample(self) -> Dict[int, ProcessTracker]:
         """Take one sample of every accessible process."""
         seen = set()
+        # Only request attributes that psutil supports on every platform here.
+        # io_counters and num_ctx_switches are not available on macOS (and
+        # io_counters is unsupported on some Linux configs), so passing them to
+        # process_iter() raises ValueError. Fetch them per-process below with a
+        # graceful fallback instead, preserving full metrics on Linux.
         for proc in psutil.process_iter(
-            ["pid", "name", "cpu_percent", "memory_percent",
-             "num_threads", "io_counters", "num_ctx_switches"]
+            ["pid", "name", "cpu_percent", "memory_percent", "num_threads"]
         ):
             try:
                 info = proc.info
                 pid = info["pid"]
                 seen.add(pid)
-                io = info.get("io_counters")
-                ctx = info.get("num_ctx_switches")
+                io = _safe_io_counters(proc)
+                ctx = _safe_ctx_switches(proc)
                 sample = ProcessSample(
                     pid=pid,
                     cpu_percent=info.get("cpu_percent") or 0.0,

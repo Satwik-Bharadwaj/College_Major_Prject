@@ -82,6 +82,48 @@ sudo ./venv/bin/python -m trainos.cli run --interval 3
 On macOS the actions are simulated (logged, not applied) so you can develop and
 demo the loop without Linux.
 
+## 4b. Demo workloads (show TrainOS scheduling live)
+
+The package ships three demo workloads that each produce a distinct,
+scheduler-relevant behaviour so you can watch TrainOS observe, classify, and
+act on them. Run them first, then start TrainOS.
+
+  - `cpu_bound`    tight compute loop  -> high steady CPU, no I/O
+  - `io_bound`     fsync'd read/write  -> lots of I/O, low CPU
+  - `interactive`  burst-then-sleep    -> bursty (high-variance) CPU
+
+Start all three in the background, then run TrainOS in another terminal:
+
+```bash
+# terminal 1: start the workloads (each runs 120s; use --duration 0 for no limit)
+./venv/bin/python -m trainos.workloads start
+
+# terminal 2: watch TrainOS classify and (with sudo, on Linux) schedule them
+sudo ./venv/bin/python -m trainos.cli run --dry-run --interval 2
+# then for real:
+sudo ./venv/bin/python -m trainos.cli run --interval 2
+
+# when done:
+./venv/bin/python -m trainos.workloads stop
+```
+
+You can also launch a single workload by hand:
+
+```bash
+./venv/bin/python -m trainos.workloads.cpu_bound &
+./venv/bin/python -m trainos.workloads.io_bound --duration 0 &
+./venv/bin/python -m trainos.workloads.interactive &
+```
+
+**Important — run the demo on Linux, not macOS.** macOS does not expose
+per-process I/O counters, so the `io_bound` workload's I/O is invisible there
+and it gets misclassified as `interactive`. On Linux, `io_counters` is
+available and all three workloads classify correctly. The `cpu_bound` workload
+classifies correctly on both.
+
+To confirm expected classes during a demo, look at the per-tick log line
+(`classes={...}`) and the session summary's `class breakdown` when you stop.
+
 ## 5. Collect real training data on Linux (optional, for stronger results)
 
 ```bash
