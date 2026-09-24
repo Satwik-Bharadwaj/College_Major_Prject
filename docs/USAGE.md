@@ -6,6 +6,17 @@ A Python package `trainos` with a one-line installer. On the target Ubuntu box
 you run `./install.sh` once, then start the scheduler as a background service.
 No kernel changes, no reboot.
 
+**Goal.** Let a demanding job -- an ML training run, or any sustained
+heavy-compute workload -- run well on a machine that was not designed for it.
+TrainOS classifies each process as `heavy_compute` (the demanding job we
+protect) or `normal` (ordinary background work), then boosts the heavy job and
+de-prioritises the background churn so the heavy job gets the CPU.
+
+**Two ways a job becomes `heavy_compute`:**
+1. The classifier infers it from behaviour (sustained high CPU + memory, steady).
+2. You flag it explicitly with `trainos flag` -- useful when the classifier is
+   still unsure (e.g. right after launch). An explicit flag always wins.
+
 ## 1. Install (Ubuntu or macOS)
 
 ```bash
@@ -75,54 +86,84 @@ When you're happy, run for real (root needed to renice other users' processes):
 
 ```bash
 sudo ./venv/bin/python -m trainos.cli run --interval 3
-# add --affinity to also pin CPU-bound jobs off core 0
+# add --affinity to also confine background jobs off core 0 (heavy job gets it)
 # add --ticks 20 to auto-stop after 20 cycles (handy for a timed demo)
 ```
 
 On macOS the actions are simulated (logged, not applied) so you can develop and
 demo the loop without Linux.
 
-## 4b. Demo workloads (show TrainOS scheduling live)
+## 4a. Flag a job as heavy_compute (user override)
 
-The package ships three demo workloads that each produce a distinct,
-scheduler-relevant behaviour so you can watch TrainOS observe, classify, and
-act on them. Run them first, then start TrainOS.
-
-  - `cpu_bound`    tight compute loop  -> high steady CPU, no I/O
-  - `io_bound`     fsync'd read/write  -> lots of I/O, low CPU
-  - `interactive`  burst-then-sleep    -> bursty (high-variance) CPU
-
-Start all three in the background, then run TrainOS in another terminal:
+If you want a specific job protected regardless of what the classifier infers,
+flag it. The override wins over the classifier and takes effect on the running
+scheduler's next tick.
 
 ```bash
-# terminal 1: start the workloads (each runs 120s; use --duration 0 for no limit)
-./venv/bin/python -m trainos.workloads start
+# by PID (e.g. a training job you just launched)
+./venv/bin/python -m trainos.cli flag --pid 12345 --class heavy_compute
 
-# terminal 2: watch TrainOS classify and (with sudo, on Linux) schedule them
+# by name/cmdline substring (matches any process whose name contains it)
+./venv/bin/python -m trainos.cli flag --name train.py --class heavy_compute
+
+./venv/bin/python -m trainos.cli flag --list          # show active overrides
+./venv/bin/python -m trainos.cli flag --clear-pid 12345
+./venv/bin/python -m trainos.cli flag --clear-all
+```
+
+## 4b. Generate background load (many jobs at once)
+
+Instead of a script per job, one generator spawns hundreds of mixed background
+jobs (all `normal`) to create realistic contention:
+
+```bash
+# spawn 100 mixed background jobs, ~90s each
+./venv/bin/python -m trainos.cli generate --count 100 --duration 90
+./venv/bin/python -m trainos.cli generate --status     # how many alive
+./venv/bin/python -m trainos.cli generate --stop        # stop them all
+```
+
+Each job is drawn from a cpu / io / interactive profile (`--cpu/--io/--interactive`
+proportions), all of which are ordinary `normal` work that should yield to a
+heavy job.
+
+## 4c. Measure it: A/B evaluation (the real result)
+
+`evaluate` runs the actual experiment behind the project's goal. It spawns
+background load plus ONE tracked ML training job, runs it once under the default
+OS scheduler and once under TrainOS (with the ML job flagged heavy_compute), and
+reports the ML job's completion time and throughput for each:
+
+```bash
+# on the Ubuntu box, ideally under sudo so boosting takes full effect
+sudo ./venv/bin/python -m trainos.cli evaluate --count 100 --rounds 20
+```
+
+Output is a table: rounds completed, wall seconds (lower is better), and
+rounds/sec (higher is better) for baseline vs TrainOS, plus the percentage
+reduction in the ML job's completion time. That is your measured, defensible
+result -- a real before/after on real processes, not a simulation.
+
+**Important — measure on Linux, ideally with root.** Only on Linux do `nice`,
+`SCHED_BATCH`, and affinity actually change scheduling; off Linux the enforcer
+simulates, so both phases look the same by design. Negative-nice boosting needs
+root; without root TrainOS can still de-prioritise the background jobs (positive
+nice), which is the larger lever, so you still see an effect. macOS also hides
+per-process I/O counters, another reason to run the real evaluation on Ubuntu.
+
+## 4d. Quick visual demo (optional)
+
+To just watch classification live, the original per-behaviour workloads still
+exist and can be launched together:
+
+```bash
+./venv/bin/python -m trainos.workloads start   # cpu + io + interactive
 sudo ./venv/bin/python -m trainos.cli run --dry-run --interval 2
-# then for real:
-sudo ./venv/bin/python -m trainos.cli run --interval 2
-
-# when done:
 ./venv/bin/python -m trainos.workloads stop
 ```
 
-You can also launch a single workload by hand:
-
-```bash
-./venv/bin/python -m trainos.workloads.cpu_bound &
-./venv/bin/python -m trainos.workloads.io_bound --duration 0 &
-./venv/bin/python -m trainos.workloads.interactive &
-```
-
-**Important — run the demo on Linux, not macOS.** macOS does not expose
-per-process I/O counters, so the `io_bound` workload's I/O is invisible there
-and it gets misclassified as `interactive`. On Linux, `io_counters` is
-available and all three workloads classify correctly. The `cpu_bound` workload
-classifies correctly on both.
-
-To confirm expected classes during a demo, look at the per-tick log line
-(`classes={...}`) and the session summary's `class breakdown` when you stop.
+These are ordinary `normal` workloads under the new model; for the priority
+side of the story use `flag` + a training job, or just run `evaluate`.
 
 ## 5. Collect real training data on Linux (optional, for stronger results)
 

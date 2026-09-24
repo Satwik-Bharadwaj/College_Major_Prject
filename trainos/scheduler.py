@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from . import override
 from .features import MetricCollector
 from .model import Classifier
 from .policy import PolicyEnforcer, Action
@@ -62,9 +63,20 @@ class TrainOSScheduler:
         self.collector.sample()
         trackers = self.collector.ready_trackers()
 
+        # Load user overrides once per tick (cheap file read). A flagged PID or
+        # name-pattern forces a class regardless of what the classifier infers,
+        # and is never filtered out as idle -- the user asked for it explicitly.
+        forced: Dict[int, str] = {}
+
         vectors, meta = [], []
+        override_meta = []  # (pid, name, forced_class)
         for pid, tracker in trackers.items():
             f = tracker.features()
+            forced_cls = override.lookup(pid, tracker.name)
+            if forced_cls is not None:
+                forced[pid] = forced_cls
+                override_meta.append((pid, tracker.name, forced_cls))
+                continue
             # ignore idle/near-dead processes to avoid churn
             if f["cpu_usage"] < self.min_cpu_to_manage and f["io_wait"] < 0.05:
                 continue
@@ -74,6 +86,10 @@ class TrainOSScheduler:
         classes = self.classifier.predict_batch(vectors)
 
         actions: List[Action] = []
+        # user-forced processes first (override wins)
+        for pid, name, cls in override_meta:
+            actions.append(self.enforcer.enforce(pid, name, cls))
+        # classifier-decided processes
         for (pid, name), cls in zip(meta, classes):
             actions.append(self.enforcer.enforce(pid, name, cls))
 

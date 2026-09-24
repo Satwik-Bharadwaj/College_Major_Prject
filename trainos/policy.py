@@ -7,6 +7,10 @@ class for a process, it applies real Linux scheduling controls:
   - scheduling policy (SCHED_OTHER / SCHED_BATCH / SCHED_IDLE)
   - CPU affinity      (optional pinning)
 
+The intent: boost the demanding heavy_compute job (e.g. an ML training run)
+and de-prioritise ordinary background work so the heavy job runs well even on
+a machine not designed for it.
+
 All actions are guarded so that:
   * on non-Linux the calls are simulated (no-op) so it stays testable
   * in --dry-run nothing is changed, only logged
@@ -28,24 +32,21 @@ except ImportError:  # keep POLICY_TABLE and helpers importable without psutil
 IS_LINUX = platform.system() == "Linux"
 
 # Per-class scheduling intent.
-#   nice: -20 (highest prio) .. 19 (lowest). We only *lower* priority for
-#         batch/compute work and *raise* it slightly for interactive work.
-#   policy: SCHED_BATCH suits throughput CPU jobs; SCHED_OTHER for interactive.
+#   nice: -20 (highest prio) .. 19 (lowest). We *raise* priority for the
+#         demanding heavy-compute job and *lower* it for ordinary background
+#         work, so the heavy job gets the CPU on an oversubscribed machine.
+#   policy: SCHED_OTHER for the priority job (fully schedulable), SCHED_BATCH
+#           for background work (yields to interactive/normal timeslices).
 POLICY_TABLE: Dict[str, Dict] = {
-    "cpu_bound": {
+    "heavy_compute": {
+        "nice": -10,
+        "sched_policy": "SCHED_OTHER",
+        "rationale": "priority workload (e.g. ML training); give it the CPU",
+    },
+    "normal": {
         "nice": 10,
         "sched_policy": "SCHED_BATCH",
-        "rationale": "throughput job, de-prioritise to protect responsiveness",
-    },
-    "io_bound": {
-        "nice": 0,
-        "sched_policy": "SCHED_OTHER",
-        "rationale": "spends time waiting on I/O, keep default fairness",
-    },
-    "interactive": {
-        "nice": -5,
-        "sched_policy": "SCHED_OTHER",
-        "rationale": "latency-sensitive, give a small priority boost",
+        "rationale": "ordinary background work, step aside for the heavy job",
     },
 }
 
@@ -86,7 +87,8 @@ class PolicyEnforcer:
         return True
 
     def enforce(self, pid: int, name: str, workload_class: str) -> Action:
-        plan = POLICY_TABLE.get(workload_class, POLICY_TABLE["io_bound"])
+        # Unknown classes fall back to `normal` (treated as background work).
+        plan = POLICY_TABLE.get(workload_class, POLICY_TABLE["normal"])
         target_nice = plan["nice"]
         policy_name = plan["sched_policy"]
 
@@ -131,13 +133,15 @@ class PolicyEnforcer:
             except (PermissionError, OSError) as exc:
                 note_parts.append(f"policy skipped: {type(exc).__name__}")
 
-        # 3) optional affinity: pin cpu_bound jobs off core 0 to protect it
+        # 3) optional affinity: keep ordinary background work off core 0 so the
+        #    heavy_compute job always has at least one uncontended core. The
+        #    heavy job itself is free to use every core.
         if self.manage_affinity and hasattr(os, "sched_setaffinity") and self._ncpu > 1:
             try:
-                if workload_class == "cpu_bound":
-                    cores = set(range(1, self._ncpu))  # avoid core 0
+                if workload_class == "normal":
+                    cores = set(range(1, self._ncpu))  # confine off core 0
                 else:
-                    cores = set(range(self._ncpu))
+                    cores = set(range(self._ncpu))     # heavy job: all cores
                 os.sched_setaffinity(pid, cores)
             except (OSError, AttributeError) as exc:
                 note_parts.append(f"affinity skipped: {type(exc).__name__}")

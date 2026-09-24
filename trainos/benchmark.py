@@ -1,32 +1,31 @@
-"""Baseline (default scheduler) vs TrainOS comparison.
+"""Illustrative simulation: default scheduler vs TrainOS for a heavy job.
 
-Two modes:
+This is a small, transparent, event-driven simulation of the target scenario:
+one demanding `heavy_compute` job (e.g. an ML training run) sharing an
+oversubscribed machine with many ordinary `normal` background jobs. It compares
+how long the heavy job takes to finish under:
 
-  simulate  : a portable, reproducible event-driven simulation of a mixed
-              workload under (a) round-robin/CFS-like fair sharing and
-              (b) TrainOS class-aware prioritisation. Runs anywhere, used to
-              demonstrate the *mechanism* and produce report numbers.
+  (a) default fair sharing  -- every runnable job gets an equal CPU slice
+  (b) TrainOS class-aware    -- the heavy job is boosted, background jobs yield
 
-  live      : (Linux only) launches real stress processes, runs them once with
-              the default scheduler and once under TrainOS, and compares wall
-              clock + interactive latency. Requires stress-ng or falls back to
-              python busy loops.
-
-The simulation is intentionally simple and transparent so it can be explained
-in a viva: interactive jobs value low latency, cpu_bound jobs value throughput.
+It exists to explain the *mechanism* and produce a quick illustrative number.
+It is NOT a measurement of the real system: the weights mirror the policy
+table, so the direction of the result is built in. For real, measured evidence
+(actual processes, real scheduling controls, measured completion time and
+throughput), use `trainos evaluate`, which runs the true A/B experiment.
 """
 
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List
 
 
 @dataclass
 class Job:
     jid: int
-    cls: str          # cpu_bound | io_bound | interactive
+    cls: str          # heavy_compute | normal
     work: float       # total work units required
     remaining: float = 0.0
     wait_time: float = 0.0
@@ -37,24 +36,24 @@ class Job:
 
 
 def _make_jobs(seed: int = 7) -> List[Job]:
+    """One big heavy_compute job amid many smaller normal background jobs."""
     rng = random.Random(seed)
     jobs = []
     jid = 0
-    for _ in range(4):
-        jobs.append(Job(jid, "cpu_bound", rng.uniform(80, 120))); jid += 1
-    for _ in range(3):
-        jobs.append(Job(jid, "io_bound", rng.uniform(30, 60))); jid += 1
-    for _ in range(5):
-        jobs.append(Job(jid, "interactive", rng.uniform(5, 15))); jid += 1
+    # the demanding job we care about
+    jobs.append(Job(jid, "heavy_compute", rng.uniform(280, 320))); jid += 1
+    # a crowd of ordinary background jobs contending for the CPU
+    for _ in range(20):
+        jobs.append(Job(jid, "normal", rng.uniform(20, 80))); jid += 1
     return jobs
 
 
 def _weights(class_aware: bool) -> Dict[str, float]:
     if class_aware:
-        # TrainOS: boost interactive, de-prioritise cpu_bound (mirrors POLICY_TABLE)
-        return {"interactive": 3.0, "io_bound": 1.5, "cpu_bound": 1.0}
+        # TrainOS: boost heavy_compute, de-prioritise normal (mirrors POLICY_TABLE)
+        return {"heavy_compute": 4.0, "normal": 1.0}
     # default fair share: everyone equal
-    return {"interactive": 1.0, "io_bound": 1.0, "cpu_bound": 1.0}
+    return {"heavy_compute": 1.0, "normal": 1.0}
 
 
 def _simulate(class_aware: bool, quantum: float = 1.0, capacity: float = 4.0):
@@ -86,12 +85,12 @@ def _simulate(class_aware: bool, quantum: float = 1.0, capacity: float = 4.0):
 
 
 def _metrics(jobs: List[Job], makespan: float) -> Dict[str, float]:
-    inter = [j.completion for j in jobs if j.cls == "interactive"]
+    heavy = [j.completion for j in jobs if j.cls == "heavy_compute"]
     return {
         "makespan": round(makespan, 3),
         "avg_completion": round(sum(j.completion for j in jobs) / len(jobs), 3),
-        "avg_interactive_completion": round(sum(inter) / len(inter), 3) if inter else 0.0,
-        "max_interactive_completion": round(max(inter), 3) if inter else 0.0,
+        "heavy_completion": round(sum(heavy) / len(heavy), 3) if heavy else 0.0,
+        "max_heavy_completion": round(max(heavy), 3) if heavy else 0.0,
     }
 
 

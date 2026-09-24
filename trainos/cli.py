@@ -137,8 +137,9 @@ def _cmd_selftest(args):
     ok = True
 
     # 1. dataset
+    from . import WORKLOAD_CLASSES as _WC
     X, y = ds.generate_synthetic(n_per_class=500, seed=1)
-    assert len(X) == 1500 and len(X[0]) == len(FEATURE_NAMES)
+    assert len(X) == 500 * len(_WC) and len(X[0]) == len(FEATURE_NAMES)
     print("[1/5] dataset generation           OK")
 
     # 2. training + selection
@@ -152,7 +153,8 @@ def _cmd_selftest(args):
     m.save(best, report, tmp)
     clf = m.Classifier(tmp)
     pred = clf.predict(X[0])
-    assert pred in ("cpu_bound", "io_bound", "interactive")
+    from . import WORKLOAD_CLASSES
+    assert pred in WORKLOAD_CLASSES
     print(f"[3/5] save/load + predict ({pred})   OK")
 
     # 4. metric collection on this machine
@@ -176,6 +178,82 @@ def _cmd_selftest(args):
     print("-" * 40)
     print("ALL CHECKS PASSED ✅" if ok else "SOME CHECKS FAILED ❌")
     return 0 if ok else 1
+
+
+def _cmd_flag(args):
+    from . import override, WORKLOAD_CLASSES
+
+    if args.list:
+        data = override.load()
+        if not data["by_pid"] and not data["by_name"]:
+            print("No overrides set.")
+            return 0
+        print("Active overrides:")
+        for pid, cls in data["by_pid"].items():
+            print(f"  pid {pid:<8} -> {cls}")
+        for pat, cls in data["by_name"].items():
+            print(f"  name ~'{pat}' -> {cls}")
+        return 0
+
+    if args.clear_all:
+        override.clear_all()
+        print("Cleared all overrides.")
+        return 0
+
+    if args.clear_pid is not None:
+        ok = override.clear_pid(args.clear_pid)
+        print(f"{'Cleared' if ok else 'No override for'} pid {args.clear_pid}.")
+        return 0
+
+    if args.clear_name is not None:
+        ok = override.clear_name(args.clear_name)
+        print(f"{'Cleared' if ok else 'No override for'} name '{args.clear_name}'.")
+        return 0
+
+    # setting an override requires a class
+    if args.workload_class not in WORKLOAD_CLASSES:
+        print(f"--class must be one of {WORKLOAD_CLASSES}", file=sys.stderr)
+        return 2
+    if args.pid is None and args.name is None:
+        print("Provide --pid or --name (or use --list/--clear-*).", file=sys.stderr)
+        return 2
+
+    if args.pid is not None:
+        override.set_pid(args.pid, args.workload_class)
+        print(f"Flagged pid {args.pid} as {args.workload_class}.")
+    if args.name is not None:
+        override.set_name(args.name, args.workload_class)
+        print(f"Flagged processes matching '{args.name}' as {args.workload_class}.")
+    print("The running scheduler will apply this on its next tick.")
+    return 0
+
+
+def _cmd_generate(args):
+    from .workloads import generator
+    if args.stop:
+        n = generator.stop_all()
+        print(f"stopped {n} background job(s).")
+        return 0
+    if args.status:
+        print(f"{generator.count_alive()} background job(s) alive.")
+        return 0
+    print(f"spawning {args.count} background jobs, ~{args.duration:.0f}s each ...")
+    spawned = generator.spawn_background(
+        count=args.count, duration=args.duration,
+        mix=(args.cpu, args.io, args.interactive), seed=args.seed,
+    )
+    print(f"spawned {len(spawned)} jobs. Stop with: trainos generate --stop")
+    return 0
+
+
+def _cmd_evaluate(args):
+    from . import evaluate
+    cmp = evaluate.run_evaluation(
+        count=args.count, bg_duration=args.bg_duration, rounds=args.rounds,
+        interval=args.interval, dry_run=args.dry_run,
+    )
+    evaluate._print_report(cmp)
+    return 0
 
 
 def _cmd_info(args):
@@ -229,6 +307,37 @@ def build_parser() -> argparse.ArgumentParser:
 
     i = sub.add_parser("info", help="environment + model status")
     i.set_defaults(func=_cmd_info)
+
+    fl = sub.add_parser("flag", help="force a process's class (overrides classifier)")
+    fl.add_argument("--pid", type=int, help="process id to flag")
+    fl.add_argument("--name", help="substring of process name/cmdline to flag")
+    fl.add_argument("--class", dest="workload_class", default="heavy_compute",
+                    help="class to force (default: heavy_compute)")
+    fl.add_argument("--list", action="store_true", help="list active overrides")
+    fl.add_argument("--clear-pid", type=int, help="remove a pid override")
+    fl.add_argument("--clear-name", help="remove a name override")
+    fl.add_argument("--clear-all", action="store_true", help="remove all overrides")
+    fl.set_defaults(func=_cmd_flag)
+
+    g = sub.add_parser("generate", help="spawn many mixed background jobs (load)")
+    g.add_argument("--count", type=int, default=60)
+    g.add_argument("--duration", type=float, default=90.0)
+    g.add_argument("--cpu", type=float, default=0.5)
+    g.add_argument("--io", type=float, default=0.25)
+    g.add_argument("--interactive", type=float, default=0.25)
+    g.add_argument("--seed", type=int, default=0)
+    g.add_argument("--stop", action="store_true", help="stop generated jobs")
+    g.add_argument("--status", action="store_true", help="count alive jobs")
+    g.set_defaults(func=_cmd_generate)
+
+    ev = sub.add_parser("evaluate",
+                        help="A/B measure the ML job under load (TrainOS off vs on)")
+    ev.add_argument("--count", type=int, default=40, help="background jobs per phase")
+    ev.add_argument("--bg-duration", type=float, default=120.0)
+    ev.add_argument("--rounds", type=int, default=15, help="ML training rounds")
+    ev.add_argument("--interval", type=float, default=2.0)
+    ev.add_argument("--dry-run", action="store_true")
+    ev.set_defaults(func=_cmd_evaluate)
 
     return p
 
